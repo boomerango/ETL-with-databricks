@@ -1,0 +1,97 @@
+name: ETL Tests
+
+on:
+  workflow_dispatch:  # Manual trigger
+    inputs:
+      reason:
+        description: 'Reason for running tests'
+        required: false
+        default: 'Manual test run'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4  
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5 
+      with:
+        python-version: '3.9'
+        
+    - name: Cache pip packages
+      uses: actions/cache@v4 
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Run linting
+      run: |
+        pip install flake8
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+        
+    # Add this step before running tests
+    - name: Create config.ini
+      env:
+        DATABRICKS_URL: ${{ secrets.DATABRICKS_URL }}
+        DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        STORAGE_ACCOUNT_NAME: ${{ secrets.STORAGE_ACCOUNT_NAME }}
+        STORAGE_ACCOUNT_KEY: ${{ secrets.STORAGE_ACCOUNT_KEY }}
+        DATABRICKS_JOB_ID: ${{ secrets.DATABRICKS_JOB_ID }}
+      run: |
+        echo "[databricks]" > config.ini
+        echo "host = $DATABRICKS_URL" >> config.ini
+        echo "token = $DATABRICKS_TOKEN" >> config.ini
+        echo "job_id = $DATABRICKS_JOB_ID" >> config.ini
+        echo "[storage]" >> config.ini
+        echo "account_name = $STORAGE_ACCOUNT_NAME" >> config.ini
+        echo "account_key = $STORAGE_ACCOUNT_KEY" >> config.ini
+
+    - name: Run ETL unit tests
+      env:
+        DATABRICKS_URL: ${{ secrets.DATABRICKS_URL }}
+        DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        STORAGE_ACCOUNT_NAME: ${{ secrets.STORAGE_ACCOUNT_NAME }}
+        STORAGE_ACCOUNT_KEY: ${{ secrets.STORAGE_ACCOUNT_KEY }}
+      run: |
+        mkdir -p report
+        pytest tests/test_etl.py -v --html=report/etl-test-report.html --self-contained-html
+
+    - name: Run integration tests
+      env:
+        DATABRICKS_URL: ${{ secrets.DATABRICKS_URL }}
+        DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+        STORAGE_ACCOUNT_NAME: ${{ secrets.STORAGE_ACCOUNT_NAME }}
+        STORAGE_ACCOUNT_KEY: ${{ secrets.STORAGE_ACCOUNT_KEY }}
+      run: |
+        pytest tests/test_integration.py -v --html=report/data-extraction-report.html --self-contained-html
+  
+    - name: Upload test reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-reports
+        path: |
+          report/etl-test-report.html
+          report/data-extraction-report.html
+          report/data-quality-report.html
+
+    - name: Notify on failure
+      if: failure()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.name,
+            title: 'ETL Pipeline Test Failure',
+            body: 'ETL tests failed in workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          })
